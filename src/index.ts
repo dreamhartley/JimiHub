@@ -238,7 +238,7 @@ function parseDataUri(dataUri: string): { mimeType: string; data: string } | nul
 function transformOpenAiToGemini(requestBody: any, requestedModelId?: string): { contents: any[]; systemInstruction?: any; tools?: any[] } {
 	const messages = requestBody.messages || [];
 	const openAiTools = requestBody.tools;
-
+	const useSystemInstruction = requestBody.useMakersuiteSysprompt ?? true
 	// 1. Transform Messages
 	const contents: any[] = [];
 	let systemInstruction: any | undefined = undefined;
@@ -256,7 +256,7 @@ function transformOpenAiToGemini(requestBody: any, requestedModelId?: string): {
 				break;
 			case 'system':
 				// Check if the model is gemma-based
-				if (requestedModelId && requestedModelId.startsWith('gemma')) {
+				if (!useSystemInstruction || requestedModelId && requestedModelId.startsWith('gemma')) {
 					// If gemma, treat system prompt as a user message
 					console.log(`Gemma model detected (${requestedModelId}). Treating system message as user message.`);
 					role = 'user';
