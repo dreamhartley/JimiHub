@@ -676,7 +676,7 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 				// 4. Prepare and Send Request to Gemini
 				const apiAction = stream ? 'streamGenerateContent' : 'generateContent';
 				const querySeparator = stream ? '?alt=sse&' : '?'; // Added alt=sse for streaming
-				const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${requestedModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`;
+				const geminiUrl = `https://gateway.ai.cloudflare.com/v1/36d13ee282f45fcf708c9e89074e3be6/gateway/google-ai-studio/v1beta/models/${requestedModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`;
 
 				const geminiRequestHeaders = new Headers();
 				geminiRequestHeaders.set('Content-Type', 'application/json');
@@ -861,7 +861,7 @@ async function handleAdminGeminiModels(request: Request, env: Env, ctx: Executio
   // Use the available key to request Gemini models list
   try {
     // Corrected URL and authentication method (using ?key= query parameter)
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${selectedKey.key}`;
+    const geminiUrl = `https://gateway.ai.cloudflare.com/v1/36d13ee282f45fcf708c9e89074e3be6/gateway/google-ai-studio/v1beta/models?key=${selectedKey.key}`;
     const response = await fetch(geminiUrl, {
       method: 'GET',
       headers: {
@@ -972,7 +972,7 @@ async function handleTestGeminiKey(request: Request, env: Env, ctx: ExecutionCon
 			contents: [{ role: "user", parts: [{ text: "Hi" }] }],
 		};
 
-		const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${body.modelId}:generateContent?key=${apiKey}`;
+		const geminiUrl = `https://gateway.ai.cloudflare.com/v1/36d13ee282f45fcf708c9e89074e3be6/gateway/google-ai-studio/v1beta/models/${body.modelId}:generateContent?key=${apiKey}`;
 
 		const response = await fetch(geminiUrl, {
 			method: 'POST',
