@@ -19,9 +19,12 @@ function getGeminiBaseUrl() {
 
 // --- Catch-all handler for /v1beta/* ---
 router.all('*', async (req, res, next) => {
-    const workerApiKey = req.workerApiKey; // Attached by requireWorkerAuth
-    const originalPath = req.path; // e.g., /models/gemini-pro:generateContent
-    const originalQuery = req.url.split('?')[1] || ''; // Get query string part
+    const workerApiKey = req.workerApiKey; // Attached by requireWorkerAuth (now reads from header or query)
+    // Use req.originalUrl to capture the full path including potential extra segments like /v1alpha
+    // Remove the base path (/v1beta) to get the path to forward
+    const basePath = req.baseUrl; // Should be '/v1beta'
+    const pathAfterBase = req.originalUrl.split('?')[0].substring(basePath.length); // e.g., /v1alpha/models/gemini-pro:generateContent
+    const originalQueryString = req.originalUrl.split('?')[1] || ''; // Get original query string
     const method = req.method;
     const requestBody = req.body; // Assumes express.json() is used
 
@@ -29,8 +32,9 @@ router.all('*', async (req, res, next) => {
 
     try {
         // --- 1. Extract Model ID for Key Selection ---
-        // Attempt to extract model from path like /models/gemini-pro:action
-        const modelMatch = originalPath.match(/^\/models\/([^:]+):/);
+        // Attempt to extract model from the path *after* the base, like /v1alpha/models/gemini-pro:action
+        // Adjust regex to potentially handle extra segments before /models/
+        const modelMatch = pathAfterBase.match(/\/models\/([^:]+):/);
         const modelId = modelMatch ? modelMatch[1] : null;
 
         if (!modelId) {
@@ -50,11 +54,24 @@ router.all('*', async (req, res, next) => {
 
         // --- 3. Construct Target Gemini URL ---
         const baseGeminiUrl = getGeminiBaseUrl();
-        // Append ONLY the original path and query string AFTER /v1beta from the incoming request
-        // The client is expected to include /v1beta in its request path to this proxy endpoint.
-        const targetUrl = `${baseGeminiUrl}${originalPath}${originalQuery ? '?' + originalQuery : ''}`;
+        // Construct the target URL using the path *after* /v1beta
+        // We will handle query parameters separately to remove the worker key
+        const targetPathAndQuery = `${baseGeminiUrl}${pathAfterBase}`;
+        const targetUrl = new URL(targetPathAndQuery);
 
-        console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
+        // --- Clean and Forward Query Parameters ---
+        const originalParams = new URLSearchParams(originalQueryString);
+        const targetParams = new URLSearchParams();
+        originalParams.forEach((value, key) => {
+            // IMPORTANT: Exclude the 'key' parameter (Worker API Key) when forwarding
+            if (key.toLowerCase() !== 'key') {
+                targetParams.append(key, value);
+            }
+        });
+        // Append the cleaned parameters to the target URL
+        targetUrl.search = targetParams.toString();
+
+        console.log(`Proxying to target URL: ${targetUrl.toString()} with key ID: ${selectedKey.id}`);
 
         // --- 4. Prepare Headers ---
         const headersToForward = { ...req.headers };
@@ -72,7 +89,7 @@ router.all('*', async (req, res, next) => {
         headersToForward['user-agent'] = 'gemini-proxy-panel-node/v1beta';
 
         // --- 5. Make the Proxied Request ---
-        const geminiResponse = await fetch(targetUrl, {
+        const geminiResponse = await fetch(targetUrl.toString(), {
             method: method,
             headers: headersToForward,
             // Only include body for relevant methods

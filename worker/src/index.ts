@@ -254,20 +254,33 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 	const originalQuery = url.search; // Includes '?' if present
 	const method = request.method;
 
-	console.log(`Handling /v1beta request: ${method} ${originalPath}`);
+	console.log(`Handling /v1beta request: ${method} ${originalPath}${originalQuery}`);
 
-	// --- Worker API Key Authentication ---
-	const workerApiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+	// --- Worker API Key Authentication (Header or Query Param) ---
+	let workerApiKey: string | null = null;
+	const authHeader = request.headers.get('Authorization');
+	const queryKey = url.searchParams.get('key'); // Read key from query
+
+	if (authHeader?.startsWith('Bearer ')) {
+		workerApiKey = authHeader.substring(7).trim();
+	} else if (queryKey) { // Check if queryKey exists
+		workerApiKey = queryKey.trim();
+		console.log("Worker key obtained from query parameter in /v1beta.");
+	}
+
 	if (!workerApiKey || !(await isValidWorkerApiKey(workerApiKey, env))) {
-		return new Response(JSON.stringify({ error: 'Invalid or missing API key' }), {
+		const errorMessage = workerApiKey ? 'Invalid API key.' : 'Missing API key. Provide it in Authorization header or as "key" query parameter.';
+		return new Response(JSON.stringify({ error: errorMessage }), {
 			status: 401,
 			headers: { 'Content-Type': 'application/json', ...corsHeaders() },
 		});
 	}
+	// Worker Key is validated
 
 	try {
 		// --- 1. Extract Model ID for Key Selection ---
-		const modelMatch = originalPath.match(/^\/models\/([^:]+):/);
+		// Attempt to extract model from the path *after* /v1beta (pathAfterBase)
+		const modelMatch = pathAfterBase.match(/\/models\/([^:]+):/);
 		const modelId = modelMatch ? modelMatch[1] : null;
 		let modelCategory: 'Pro' | 'Flash' | 'Custom' | undefined = undefined;
 
@@ -275,7 +288,7 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 			const modelsConfig = await env.WORKER_CONFIG_KV.get(KV_KEY_MODELS, "json") as Record<string, ModelConfig> | null;
 			modelCategory = modelsConfig?.[modelId]?.category;
 		} else {
-			console.warn(`Could not extract modelId from path: ${originalPath} for key selection.`);
+			console.warn(`Could not extract modelId from path: ${pathAfterBase} for key selection.`);
 		}
 
 		// --- 2. Get Rotated Gemini API Key ---
@@ -290,22 +303,35 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 
 		// --- 3. Construct Target Gemini URL ---
 		const baseGeminiUrl = getBaseGeminiUrl(env);
-		// Append ONLY the original path and query string AFTER /v1beta from the incoming request
-		// The client is expected to include /v1beta in its request path to this proxy endpoint.
-		const targetUrl = `${baseGeminiUrl}${originalPath}${originalQuery}`;
+		// Construct the target URL using the path *after* /v1beta
+		const targetPath = `${baseGeminiUrl}${pathAfterBase}`; // Base URL + Path after /v1beta
+		const targetUrl = new URL(targetPath);
 
-		console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
+		// --- Clean and Forward Query Parameters ---
+		const originalParams = new URLSearchParams(originalQueryString); // Parse original query string
+		const targetParams = new URLSearchParams();
+		originalParams.forEach((value, key) => {
+			// IMPORTANT: Exclude the 'key' parameter (Worker API Key) when forwarding
+			if (key.toLowerCase() !== 'key') {
+				targetParams.append(key, value);
+			}
+		});
+		// IMPORTANT: Add the rotated Gemini API key as 'key' parameter for the outgoing request
+		targetParams.set('key', selectedKey.key);
+
+		// Append the final parameters to the target URL
+		targetUrl.search = targetParams.toString();
+
+		console.log(`Proxying to target URL: ${targetUrl.toString()} with Gemini key ID: ${selectedKey.id}`);
 
 		// --- 4. Prepare Headers ---
 		const headersToForward = new Headers(request.headers);
 		// Remove headers specific to this proxy or potentially problematic
 		headersToForward.delete('host');
-		headersToForward.delete('authorization'); // Remove original worker key auth
+		headersToForward.delete('authorization'); // Remove original worker key auth (if present)
 		headersToForward.delete('connection');
-		// Add the Gemini API key via query parameter (standard for Gemini REST API)
-		// We need to add it to the URL itself, not as a header.
-		const urlWithKey = new URL(targetUrl);
-		urlWithKey.searchParams.set('key', selectedKey.key);
+		// Gemini API key is now added via targetUrl.searchParams above
+		headersToForward.delete('x-goog-api-key'); // Ensure no conflicting header is sent
 
 		// Set a user-agent
 		headersToForward.set('user-agent', 'gemini-proxy-panel-worker/v1beta');
@@ -319,7 +345,7 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 		// Clone the request to read the body if necessary, or pass the original body stream
 		const body = (method !== 'GET' && method !== 'HEAD') ? request.body : null;
 
-		const geminiResponse = await fetch(urlWithKey.toString(), {
+		const geminiResponse = await fetch(targetUrl.toString(), { // Use the final URL with Gemini key param
 			method: method,
 			headers: headersToForward,
 			body: body,
