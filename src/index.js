@@ -13,6 +13,7 @@ const { db } = require('./db');
 const authRoutes = require('./routes/auth');
 const adminApiRoutes = require('./routes/adminApi');
 const apiV1Routes = require('./routes/apiV1');
+const apiV1betaRoutes = require('./routes/apiV1beta'); // Import the new v1beta routes
 
 // Import middleware
 const requireAdminAuth = require('./middleware/adminAuth');
@@ -70,7 +71,8 @@ app.use('/admin', requireAdminAuth, express.static(path.join(__dirname, '..', 'p
 // --- API Routes ---
 app.use('/api', authRoutes); 
 app.use('/api/admin', requireAdminAuth, adminApiRoutes); 
-app.use('/v1', apiV1Routes); 
+app.use('/v1', apiV1Routes);
+app.use('/v1beta', apiV1betaRoutes); // Mount the new v1beta routes
 
 // --- Global Error Handler ---
 app.use((err, req, res, next) => {

@@ -93,6 +93,13 @@ export default {
 				}
 				return await handleApiV1(request, env, ctx);
 			}
+			// New: API endpoint for direct Gemini proxying
+			if (pathname.startsWith('/v1beta/')) {
+				if (request.method === 'OPTIONS') {
+					return handleOptions(request);
+				}
+				return await handleApiV1Beta(request, env, ctx);
+			}
 
 			// --- Login Page ---
 			if (pathname === '/login') {
@@ -238,6 +245,134 @@ async function handleApiV1(request: Request, env: Env, ctx: ExecutionContext): P
 
 	return new Response('Not Found in /v1/', { status: 404, headers: corsHeaders() });
 }
+
+
+// --- API v1beta Handler (Direct Gemini Proxy) ---
+async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	const url = new URL(request.url);
+	const originalPath = url.pathname.replace(/^\/v1beta/, ''); // Remove /v1beta prefix, e.g., /models/gemini-pro:generateContent
+	const originalQuery = url.search; // Includes '?' if present
+	const method = request.method;
+
+	console.log(`Handling /v1beta request: ${method} ${originalPath}`);
+
+	// --- Worker API Key Authentication ---
+	const workerApiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+	if (!workerApiKey || !(await isValidWorkerApiKey(workerApiKey, env))) {
+		return new Response(JSON.stringify({ error: 'Invalid or missing API key' }), {
+			status: 401,
+			headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+		});
+	}
+
+	try {
+		// --- 1. Extract Model ID for Key Selection ---
+		const modelMatch = originalPath.match(/^\/models\/([^:]+):/);
+		const modelId = modelMatch ? modelMatch[1] : null;
+		let modelCategory: 'Pro' | 'Flash' | 'Custom' | undefined = undefined;
+
+		if (modelId) {
+			const modelsConfig = await env.WORKER_CONFIG_KV.get(KV_KEY_MODELS, "json") as Record<string, ModelConfig> | null;
+			modelCategory = modelsConfig?.[modelId]?.category;
+		} else {
+			console.warn(`Could not extract modelId from path: ${originalPath} for key selection.`);
+		}
+
+		// --- 2. Get Rotated Gemini API Key ---
+		const selectedKey = await getNextAvailableGeminiKey(env, ctx, modelId ?? undefined); // Pass modelId if found
+
+		if (!selectedKey) {
+			return new Response(JSON.stringify({ error: { message: "No available Gemini API Key configured or all keys are currently rate-limited/invalid.", type: "no_key_available" } }), {
+				status: 503,
+				headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+			});
+		}
+
+		// --- 3. Construct Target Gemini URL ---
+		const baseGeminiUrl = getBaseGeminiUrl(env);
+		// Append the original path and query string from the /v1beta request
+		// IMPORTANT: Gemini API uses /v1beta path prefix, ensure it's included correctly
+		const targetUrl = `${baseGeminiUrl}/v1beta${originalPath}${originalQuery}`;
+
+		console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
+
+		// --- 4. Prepare Headers ---
+		const headersToForward = new Headers(request.headers);
+		// Remove headers specific to this proxy or potentially problematic
+		headersToForward.delete('host');
+		headersToForward.delete('authorization'); // Remove original worker key auth
+		headersToForward.delete('connection');
+		// Add the Gemini API key via query parameter (standard for Gemini REST API)
+		// We need to add it to the URL itself, not as a header.
+		const urlWithKey = new URL(targetUrl);
+		urlWithKey.searchParams.set('key', selectedKey.key);
+
+		// Set a user-agent
+		headersToForward.set('user-agent', 'gemini-proxy-panel-worker/v1beta');
+		// Ensure content-type if needed (fetch might add it automatically based on body)
+		if (method !== 'GET' && method !== 'HEAD' && !headersToForward.has('content-type')) {
+			headersToForward.set('content-type', 'application/json');
+		}
+
+
+		// --- 5. Make the Proxied Request ---
+		// Clone the request to read the body if necessary, or pass the original body stream
+		const body = (method !== 'GET' && method !== 'HEAD') ? request.body : null;
+
+		const geminiResponse = await fetch(urlWithKey.toString(), {
+			method: method,
+			headers: headersToForward,
+			body: body,
+			// Cloudflare Workers handle redirects automatically by default
+			// redirect: 'manual' // If you need to handle redirects manually
+		});
+
+		// --- 6. Handle Response ---
+		// Create a new response with the body and headers from the upstream response
+		const responseHeaders = new Headers(geminiResponse.headers);
+		// Add custom headers
+		responseHeaders.set('X-Proxied-By', 'gemini-proxy-panel-worker/v1beta');
+		responseHeaders.set('X-Selected-Key-ID', selectedKey.id);
+		// Add CORS headers
+		Object.entries(corsHeaders()).forEach(([key, value]) => responseHeaders.set(key, value));
+
+		// Create the final response, potentially streaming
+		const response = new Response(geminiResponse.body, {
+			status: geminiResponse.status,
+			statusText: geminiResponse.statusText,
+			headers: responseHeaders,
+		});
+
+		// --- 7. Background Tasks (Usage Increment, Error Handling) ---
+		ctx.waitUntil((async () => {
+			if (geminiResponse.ok) {
+				await incrementKeyUsage(selectedKey.id, env, modelId ?? undefined, modelCategory);
+			} else {
+				console.warn(`Gemini API returned non-OK status ${geminiResponse.status} for key ${selectedKey.id} on /v1beta`);
+				if (geminiResponse.status === 429) {
+					// Attempt to read error message (clone response if body needed elsewhere)
+					// Note: Reading the body here might prevent it from being streamed to the client
+					// It's safer to handle 429 without reading the body if streaming is critical
+					let errorMessage = "Quota exceeded (could not read body)";
+					// try { errorMessage = await geminiResponse.clone().text(); } catch {} // Example if cloning needed
+					await handle429Error(selectedKey.id, env, modelCategory!, modelId ?? undefined, errorMessage);
+				} else if (geminiResponse.status === 401 || geminiResponse.status === 403) {
+					await recordKeyError(selectedKey.id, env, geminiResponse.status as 401 | 403);
+				}
+			}
+		})());
+
+		return response;
+
+	} catch (error) {
+		console.error("Error in /v1beta proxy handler:", error);
+		return new Response(JSON.stringify({ error: { message: `Internal Worker Error: ${error instanceof Error ? error.message : String(error)}`, type: 'worker_proxy_error' } }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+		});
+	}
+}
+
 
 // --- API v1 Endpoint Implementations ---
 
