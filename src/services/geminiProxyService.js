@@ -5,8 +5,17 @@ const configService = require('./configService');
 const geminiKeyService = require('./geminiKeyService');
 const transformUtils = require('../utils/transform');
 
-// Base Gemini API URL
-const BASE_GEMINI_URL = 'https://generativelanguage.googleapis.com';
+// Base Gemini API URL - Default
+const DEFAULT_GEMINI_URL = 'https://generativelanguage.googleapis.com';
+// Read custom gateway URL from environment variable
+const CF_GATEWAY_URL = process.env.CF_GATEWAY;
+
+// Determine the actual base URL to use, removing trailing slashes if present
+const effectiveGatewayUrl = CF_GATEWAY_URL && CF_GATEWAY_URL.trim() !== '' ? CF_GATEWAY_URL.trim().replace(/\/$/, '') : null;
+const BASE_GEMINI_URL = effectiveGatewayUrl || DEFAULT_GEMINI_URL;
+
+// Log the final base URL being used
+console.log(`Using Gemini API Base URL: ${BASE_GEMINI_URL}`);
 
 async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream) {
     // Check if KEEPALIVE mode is enabled
@@ -139,9 +148,9 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream) {
                 // If keepalive is enabled and original request was streaming, use non-streaming API
                 const apiAction = actualStreamMode ? 'streamGenerateContent' : 'generateContent';
                 
-                // Build complete API URL with the default Gemini API URL
+                // Build complete API URL using the determined BASE_GEMINI_URL
                 // Use actualModelId instead of requestedModelId with -search suffix
-                const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}`;
+                const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}`; // BASE_GEMINI_URL is now dynamic
                 
                 const geminiRequestHeaders = {
                     'Content-Type': 'application/json',

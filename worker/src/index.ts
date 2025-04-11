@@ -10,11 +10,23 @@ export interface Env {
 	ADMIN_PASSWORD?: string;
 	SESSION_SECRET_KEY?: string;
 	KEEPALIVE_ENABLED?: string; // Added for keepalive feature
+	CF_GATEWAY?: string; // Custom Gemini API endpoint (e.g., Cloudflare AI Gateway)
 }
 
-// --- Session Constants ---
+// --- Constants ---
 const SESSION_COOKIE_NAME = '__session';
-const SESSION_DURATION_SECONDS = 1 * 60 * 60; 
+const SESSION_DURATION_SECONDS = 1 * 60 * 60;
+const DEFAULT_GEMINI_URL = 'https://generativelanguage.googleapis.com';
+
+// Helper function to get the effective Gemini base URL
+function getBaseGeminiUrl(env: Env): string {
+	const customGateway = env.CF_GATEWAY;
+	const effectiveGatewayUrl = customGateway && customGateway.trim() !== '' ? customGateway.trim().replace(/\/$/, '') : null;
+	const baseUrl = effectiveGatewayUrl || DEFAULT_GEMINI_URL;
+	// Log only once or conditionally if needed, as this might be called frequently
+	// console.log(`Worker using Gemini API Base URL: ${baseUrl}`);
+	return baseUrl;
+}
 
 // --- KV Keys ---
 const KV_KEY_MODELS = "models";
@@ -807,7 +819,8 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 				const querySeparator = actualStreamMode ? '?alt=sse&' : '?'; // Use alt=sse only if actually streaming to Gemini
 
 				// For -search models, use the original model name
-				const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${actualModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`;
+				const BASE_GEMINI_URL = getBaseGeminiUrl(env); // Get dynamic base URL
+				const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`;
 
 				const geminiRequestHeaders = new Headers();
 				geminiRequestHeaders.set('Content-Type', 'application/json');
@@ -1147,7 +1160,8 @@ async function handleAdminGeminiModels(request: Request, env: Env, ctx: Executio
   // Use the available key to request Gemini models list
   try {
     // Corrected URL and authentication method (using ?key= query parameter)
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${selectedKey.key}`;
+  const BASE_GEMINI_URL = getBaseGeminiUrl(env); // Get dynamic base URL
+    const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models?key=${selectedKey.key}`;
     const response = await fetch(geminiUrl, {
       method: 'GET',
       headers: {
@@ -1257,7 +1271,8 @@ async function handleTestGeminiKey(request: Request, env: Env, ctx: ExecutionCon
 		const testGeminiRequestBody = {
 			contents: [{ role: "user", parts: [{ text: "Hi" }] }],
 		};
-
+const BASE_GEMINI_URL = getBaseGeminiUrl(env); // Get dynamic base URL
+const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${body.modelId}:generateContent?key=${apiKey}`;
 		const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${body.modelId}:generateContent?key=${apiKey}`;
 
 		const response = await fetch(geminiUrl, {

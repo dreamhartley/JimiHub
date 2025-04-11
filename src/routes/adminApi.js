@@ -60,12 +60,16 @@ router.delete('/gemini-keys/:id', async (req, res, next) => {
     }
 });
 
-// Base Gemini API URL
-const BASE_GEMINI_URL = 'https://generativelanguage.googleapis.com';
+// Base Gemini API URL - Default
+const DEFAULT_GEMINI_URL = 'https://generativelanguage.googleapis.com';
 
-// Helper to get the base URL for Gemini API
+// Helper to get the effective base URL for Gemini API, considering CF_GATEWAY env var
 function getGeminiBaseUrl() {
-    return BASE_GEMINI_URL;
+    const customGateway = process.env.CF_GATEWAY;
+    const effectiveGatewayUrl = customGateway && customGateway.trim() !== '' ? customGateway.trim().replace(/\/$/, '') : null;
+    const baseUrl = effectiveGatewayUrl || DEFAULT_GEMINI_URL;
+    // console.log(`Admin API using Gemini Base URL: ${baseUrl}`); // Optional logging
+    return baseUrl;
 }
 
 // --- Test Gemini Key --- (/api/admin/test-gemini-key)
