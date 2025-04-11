@@ -149,8 +149,8 @@ async function proxyChatCompletions(openAIRequestBody, workerApiKey, stream) {
                 const apiAction = actualStreamMode ? 'streamGenerateContent' : 'generateContent';
                 
                 // Build complete API URL using the determined BASE_GEMINI_URL
-                // Use the original requestedModelId (including -search if present) for the API call
-                const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${requestedModelId}:${apiAction}`; // Use requestedModelId
+                // Use actualModelId instead of requestedModelId with -search suffix
+                const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}`; // BASE_GEMINI_URL is now dynamic
                 
                 const geminiRequestHeaders = {
                     'Content-Type': 'application/json',

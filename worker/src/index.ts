@@ -678,11 +678,17 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 			workerApiKey ? env.WORKER_CONFIG_KV.get(KV_KEY_WORKER_KEYS_SAFETY) : Promise.resolve(null) // Fetches string or null
 		]);
 
-		modelInfo = modelsConfig?.[requestedModelId];
+		// Determine actual model ID (strip -search suffix if present) BEFORE looking up config
+		const isSearchModel = requestedModelId.endsWith('-search');
+		const actualModelId = isSearchModel ? requestedModelId.replace('-search', '') : requestedModelId;
+
+		// Look up model config using the actual model ID
+		modelInfo = modelsConfig?.[actualModelId];
 		if (!modelInfo) {
-			return new Response(JSON.stringify({ error: `Model '${requestedModelId}' is not configured.` }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+			// Use actualModelId in the error message for clarity
+			return new Response(JSON.stringify({ error: `Model '${actualModelId}' (base for '${requestedModelId}') is not configured.` }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
 		}
-		modelCategory = modelInfo.category;
+		modelCategory = modelInfo.category; // Category comes from the base model config
 
 		// Determine safety settings based on worker key
 		if (workerApiKey && safetySettingsJson) {
@@ -787,8 +793,9 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 
 				// Check if web search functionality needs to be enabled
 				// 1. Via web_search parameter or 2. Using a model ending with -search
-				const isSearchModel = requestedModelId.endsWith('-search');
-				const actualModelId = isSearchModel ? requestedModelId.replace('-search', '') : requestedModelId;
+				// isSearchModel and actualModelId are now calculated earlier (before modelInfo lookup)
+				// const isSearchModel = requestedModelId.endsWith('-search'); // Keep for reference if needed elsewhere
+				// const actualModelId = isSearchModel ? requestedModelId.replace('-search', '') : requestedModelId; // Keep for reference if needed elsewhere
 
 				if (requestBody.web_search === 1 || isSearchModel) {
 					console.log(`Web search enabled for this request (${isSearchModel ? 'model-based' : 'parameter-based'})`);
@@ -818,9 +825,9 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 				const apiAction = actualStreamMode ? 'streamGenerateContent' : 'generateContent';
 				const querySeparator = actualStreamMode ? '?alt=sse&' : '?'; // Use alt=sse only if actually streaming to Gemini
 
-				// Use the original requestedModelId (including -search if present) for the API call
+				// For -search models, use the actual model ID (without -search) for the API call URL
 				const BASE_GEMINI_URL = getBaseGeminiUrl(env); // Get dynamic base URL
-				const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${requestedModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`; // Use requestedModelId
+				const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`; // Already using actualModelId here, which is correct
 
 				const geminiRequestHeaders = new Headers();
 				geminiRequestHeaders.set('Content-Type', 'application/json');
@@ -880,6 +887,7 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 				} else {
 					// 6. Process Successful Response
 					console.log(`Attempt ${attempt}: Request successful with key ${selectedKey.id}.`);
+					// Increment usage using the actual model ID
 					ctx.waitUntil(incrementKeyUsage(selectedKey.id, env, actualModelId, modelCategory, true)); // Reset 429 counters on success
 
 					// --- Handle Response Transformation ---
@@ -1017,6 +1025,7 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 												continue;
 											}
 											const jsonData = JSON.parse(trimmedData);
+											// Pass requestedModelId (with -search if present) to transformer for correct display in client
 											const openaiChunkStr = transformGeminiStreamChunk(jsonData, requestedModelId!);
 											if (openaiChunkStr) controller.enqueue(new TextEncoder().encode(openaiChunkStr));
 										} catch (e) {
@@ -1059,6 +1068,7 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 						console.log("Processing successful response in NON-STREAMING mode.");
 						const geminiJson = await geminiResponse.json();
 						// Use the object transformation function
+						// Pass requestedModelId (with -search if present) to transformer for correct display in client
 						const openaiJsonObject = transformGeminiResponseToOpenAIObject(geminiJson, requestedModelId!);
 						return new Response(JSON.stringify(openaiJsonObject), { status: 200, headers: responseHeaders });
 					}
