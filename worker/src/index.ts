@@ -1273,7 +1273,6 @@ async function handleTestGeminiKey(request: Request, env: Env, ctx: ExecutionCon
 		};
 const BASE_GEMINI_URL = getBaseGeminiUrl(env); // Get dynamic base URL
 const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${body.modelId}:generateContent?key=${apiKey}`;
-		const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${body.modelId}:generateContent?key=${apiKey}`;
 
 		const response = await fetch(geminiUrl, {
 			method: 'POST',
