@@ -50,8 +50,9 @@ router.all('*', async (req, res, next) => {
 
         // --- 3. Construct Target Gemini URL ---
         const baseGeminiUrl = getGeminiBaseUrl();
-        // Append the original path and query string from the /v1beta request
-        const targetUrl = `${baseGeminiUrl}/v1beta${originalPath}${originalQuery ? '?' + originalQuery : ''}`;
+        // Append ONLY the original path and query string AFTER /v1beta from the incoming request
+        // The client is expected to include /v1beta in its request path to this proxy endpoint.
+        const targetUrl = `${baseGeminiUrl}${originalPath}${originalQuery ? '?' + originalQuery : ''}`;
 
         console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
 

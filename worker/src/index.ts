@@ -290,9 +290,9 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 
 		// --- 3. Construct Target Gemini URL ---
 		const baseGeminiUrl = getBaseGeminiUrl(env);
-		// Append the original path and query string from the /v1beta request
-		// IMPORTANT: Gemini API uses /v1beta path prefix, ensure it's included correctly
-		const targetUrl = `${baseGeminiUrl}/v1beta${originalPath}${originalQuery}`;
+		// Append ONLY the original path and query string AFTER /v1beta from the incoming request
+		// The client is expected to include /v1beta in its request path to this proxy endpoint.
+		const targetUrl = `${baseGeminiUrl}${originalPath}${originalQuery}`;
 
 		console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
 
