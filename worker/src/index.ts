@@ -818,9 +818,9 @@ async function handleV1ChatCompletions(request: Request, env: Env, ctx: Executio
 				const apiAction = actualStreamMode ? 'streamGenerateContent' : 'generateContent';
 				const querySeparator = actualStreamMode ? '?alt=sse&' : '?'; // Use alt=sse only if actually streaming to Gemini
 
-				// For -search models, use the original model name
+				// Use the original requestedModelId (including -search if present) for the API call
 				const BASE_GEMINI_URL = getBaseGeminiUrl(env); // Get dynamic base URL
-				const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${actualModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`;
+				const geminiUrl = `${BASE_GEMINI_URL}/v1beta/models/${requestedModelId}:${apiAction}${querySeparator}key=${selectedKey.key}`; // Use requestedModelId
 
 				const geminiRequestHeaders = new Headers();
 				geminiRequestHeaders.set('Content-Type', 'application/json');
