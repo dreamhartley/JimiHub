@@ -17,28 +17,55 @@ function getGeminiBaseUrl() {
     return baseUrl;
 }
 
+// Middleware to extract Worker API Key from query param if header is missing
+const workerAuthFromQuery = (req, res, next) => {
+    if (!req.headers.authorization && req.query.key) {
+        // Found key in query param, treat it as Worker API Key for this request
+        // Attach it for requireWorkerAuth middleware or direct use
+        req.headers.authorization = `Bearer ${req.query.key}`;
+        console.log('Using Worker API Key from query parameter.');
+        // IMPORTANT: Remove the key from the query object so it's not forwarded
+        delete req.query.key;
+        // Reconstruct req.url without the key for subsequent middleware/routing
+        const urlParts = req.url.split('?');
+        const queryParams = new URLSearchParams(urlParts[1] || '');
+        queryParams.delete('key');
+        req.url = urlParts[0] + (queryParams.toString() ? `?${queryParams.toString()}` : '');
+    }
+    next();
+};
+
+// Apply query param auth check *before* the standard worker auth
+router.use(workerAuthFromQuery);
+router.use(requireWorkerAuth); // Now this can validate header even if it came from query
+
 // --- Catch-all handler for /v1beta/* ---
 router.all('*', async (req, res, next) => {
-    const workerApiKey = req.workerApiKey; // Attached by requireWorkerAuth (now reads from header or query)
-    // Use req.originalUrl to capture the full path including potential extra segments like /v1alpha
-    // Remove the base path (/v1beta) to get the path to forward
-    const basePath = req.baseUrl; // Should be '/v1beta'
-    const pathAfterBase = req.originalUrl.split('?')[0].substring(basePath.length); // e.g., /v1alpha/models/gemini-pro:generateContent
-    const originalQueryString = req.originalUrl.split('?')[1] || ''; // Get original query string
+    const workerApiKey = req.workerApiKey; // Now correctly populated even from query
+    // Extract the path *after* /v1beta/
+    let subPath = req.path;
+    // Find the actual Gemini API path (e.g., /models, /files) after potential extra segments
+    const geminiPathMatch = subPath.match(/(\/models\/|\/files\/|\/operations\/|\/tunedModels\/|\/permission\/).*/);
+    const actualGeminiPath = geminiPathMatch ? geminiPathMatch[0] : subPath; // Fallback to subPath if pattern not found
+
+    // Get the original query string (already modified by workerAuthFromQuery if key was present)
+    const originalQuery = req.url.split('?')[1] || '';
     const method = req.method;
     const requestBody = req.body; // Assumes express.json() is used
+
+    console.log(`Received /v1beta request. Worker Key: ${workerApiKey ? 'OK' : 'Not Found/Invalid'}. Original SubPath: ${subPath}. Detected Gemini Path: ${actualGeminiPath}`);
 
     console.log(`Received /v1beta request: ${method} ${originalPath}`);
 
     try {
         // --- 1. Extract Model ID for Key Selection ---
-        // Attempt to extract model from the path *after* the base, like /v1alpha/models/gemini-pro:action
-        // Adjust regex to potentially handle extra segments before /models/
-        const modelMatch = pathAfterBase.match(/\/models\/([^:]+):/);
+        // Attempt to extract model from path like /models/gemini-pro:action
+        // Attempt to extract model from the *actual* Gemini path
+        const modelMatch = actualGeminiPath.match(/^\/models\/([^:]+):/);
         const modelId = modelMatch ? modelMatch[1] : null;
 
         if (!modelId) {
-            console.warn(`Could not extract modelId from path: ${originalPath} for key selection.`);
+            console.warn(`Could not extract modelId from normalized path: ${normalizedPath} (original client path: ${clientPath}) for key selection.`);
             // Proceed without modelId for key selection if necessary, or return error?
             // For now, let's proceed, getNextAvailableGeminiKey might handle null modelId
         }
@@ -54,30 +81,16 @@ router.all('*', async (req, res, next) => {
 
         // --- 3. Construct Target Gemini URL ---
         const baseGeminiUrl = getGeminiBaseUrl();
-        // Construct the target URL using the path *after* /v1beta
-        // We will handle query parameters separately to remove the worker key
-        const targetPathAndQuery = `${baseGeminiUrl}${pathAfterBase}`;
-        const targetUrl = new URL(targetPathAndQuery);
+        // Append the *actual detected* Gemini path and the (potentially modified) query string
+        const targetUrl = `${baseGeminiUrl}${actualGeminiPath}${originalQuery ? '?' + originalQuery : ''}`;
 
-        // --- Clean and Forward Query Parameters ---
-        const originalParams = new URLSearchParams(originalQueryString);
-        const targetParams = new URLSearchParams();
-        originalParams.forEach((value, key) => {
-            // IMPORTANT: Exclude the 'key' parameter (Worker API Key) when forwarding
-            if (key.toLowerCase() !== 'key') {
-                targetParams.append(key, value);
-            }
-        });
-        // Append the cleaned parameters to the target URL
-        targetUrl.search = targetParams.toString();
-
-        console.log(`Proxying to target URL: ${targetUrl.toString()} with key ID: ${selectedKey.id}`);
+        console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
 
         // --- 4. Prepare Headers ---
         const headersToForward = { ...req.headers };
         // Remove headers specific to this proxy or potentially problematic
         delete headersToForward['host'];
-        delete headersToForward['authorization']; // Remove original worker key auth
+        delete headersToForward['authorization']; // Remove original worker key auth (whether from header or query)
         delete headersToForward['connection'];
         // Add the Gemini API key
         headersToForward['x-goog-api-key'] = selectedKey.key;
@@ -89,7 +102,7 @@ router.all('*', async (req, res, next) => {
         headersToForward['user-agent'] = 'gemini-proxy-panel-node/v1beta';
 
         // --- 5. Make the Proxied Request ---
-        const geminiResponse = await fetch(targetUrl.toString(), {
+        const geminiResponse = await fetch(targetUrl, {
             method: method,
             headers: headersToForward,
             // Only include body for relevant methods

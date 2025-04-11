@@ -8,24 +8,12 @@ const { db } = require('../db'); // Import the database connection
  * @param {import('express').NextFunction} next
  */
 async function requireWorkerAuth(req, res, next) {
-    let workerApiKey = null;
     const authHeader = req.headers.authorization;
-
-    // 1. Try Authorization header
-    if (authHeader?.startsWith('Bearer ')) {
-        workerApiKey = authHeader.substring(7);
-    }
-    // 2. Try ?key= query parameter if header not found or invalid
-    else if (req.query.key && typeof req.query.key === 'string') {
-        workerApiKey = req.query.key;
-        console.log("Worker key obtained from query parameter."); // Optional logging
-    }
+    const workerApiKey = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
 
     if (!workerApiKey) {
-        return res.status(401).json({ error: 'Missing API key. Provide it in the Authorization header as "Bearer YOUR_KEY" or as a "key" query parameter.' });
+        return res.status(401).json({ error: 'Missing API key. Provide it in the Authorization header as "Bearer YOUR_KEY".' });
     }
-    // Ensure workerApiKey is trimmed
-    workerApiKey = workerApiKey.trim();
 
     try {
         // Query the database to see if the key exists

@@ -250,37 +250,51 @@ async function handleApiV1(request: Request, env: Env, ctx: ExecutionContext): P
 // --- API v1beta Handler (Direct Gemini Proxy) ---
 async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	const url = new URL(request.url);
-	const originalPath = url.pathname.replace(/^\/v1beta/, ''); // Remove /v1beta prefix, e.g., /models/gemini-pro:generateContent
-	const originalQuery = url.search; // Includes '?' if present
+	// Extract the path *after* /v1beta/
+	let subPath = url.pathname.replace(/^\/v1beta/, '');
+	// Find the actual Gemini API path (e.g., /models, /files) after potential extra segments
+	   // This regex helps handle cases like /v1beta/v1alpha/models/... correctly
+	   const geminiPathMatch = subPath.match(/(\/v1beta\/|\/v1alpha\/|\/v1\/|\/models\/|\/files\/|\/operations\/|\/tunedModels\/|\/permission\/).*/);
+	   const actualGeminiPath = geminiPathMatch ? geminiPathMatch[0] : subPath; // Fallback to subPath
+
+	let originalQuery = url.search; // Includes '?' if present
 	const method = request.method;
 
-	console.log(`Handling /v1beta request: ${method} ${originalPath}${originalQuery}`);
+	console.log(`Handling /v1beta request: ${method} ${actualGeminiPath}`);
 
 	// --- Worker API Key Authentication (Header or Query Param) ---
-	let workerApiKey: string | null = null;
-	const authHeader = request.headers.get('Authorization');
-	const queryKey = url.searchParams.get('key'); // Read key from query
+	let workerApiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+	const queryParams = new URLSearchParams(originalQuery);
+	const keyFromQuery = queryParams.get('key');
 
-	if (authHeader?.startsWith('Bearer ')) {
-		workerApiKey = authHeader.substring(7).trim();
-	} else if (queryKey) { // Check if queryKey exists
-		workerApiKey = queryKey.trim();
-		console.log("Worker key obtained from query parameter in /v1beta.");
-	}
+	if (!workerApiKey && keyFromQuery) {
+		// Use key from query parameter if header is missing
+		console.log('Using Worker API Key from query parameter for /v1beta.');
+		workerApiKey = keyFromQuery;
+		// Remove the key from query parameters before forwarding
+		queryParams.delete('key');
+		originalQuery = queryParams.toString() ? `?${queryParams.toString()}` : '';
+	       // Update the URL object's search part for consistency if needed later
+	       url.search = originalQuery;
+	} else if (workerApiKey && keyFromQuery) {
+	       // If both exist, prefer header but still remove query param
+	       console.warn("Worker API Key found in both Authorization header and query parameter. Using header value and removing query parameter.");
+	       queryParams.delete('key');
+		originalQuery = queryParams.toString() ? `?${queryParams.toString()}` : '';
+	       url.search = originalQuery;
+	   }
+
 
 	if (!workerApiKey || !(await isValidWorkerApiKey(workerApiKey, env))) {
-		const errorMessage = workerApiKey ? 'Invalid API key.' : 'Missing API key. Provide it in Authorization header or as "key" query parameter.';
-		return new Response(JSON.stringify({ error: errorMessage }), {
+		return new Response(JSON.stringify({ error: 'Invalid or missing Worker API key (checked header and query)' }), {
 			status: 401,
 			headers: { 'Content-Type': 'application/json', ...corsHeaders() },
 		});
 	}
-	// Worker Key is validated
 
 	try {
-		// --- 1. Extract Model ID for Key Selection ---
-		// Attempt to extract model from the path *after* /v1beta (pathAfterBase)
-		const modelMatch = pathAfterBase.match(/\/models\/([^:]+):/);
+		// --- 1. Extract Model ID for Key Selection (Use actualGeminiPath) ---
+		const modelMatch = actualGeminiPath.match(/^\/models\/([^:]+):/);
 		const modelId = modelMatch ? modelMatch[1] : null;
 		let modelCategory: 'Pro' | 'Flash' | 'Custom' | undefined = undefined;
 
@@ -288,7 +302,7 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 			const modelsConfig = await env.WORKER_CONFIG_KV.get(KV_KEY_MODELS, "json") as Record<string, ModelConfig> | null;
 			modelCategory = modelsConfig?.[modelId]?.category;
 		} else {
-			console.warn(`Could not extract modelId from path: ${pathAfterBase} for key selection.`);
+			console.warn(`Could not extract modelId from path: ${actualGeminiPath} for key selection.`);
 		}
 
 		// --- 2. Get Rotated Gemini API Key ---
@@ -303,35 +317,21 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 
 		// --- 3. Construct Target Gemini URL ---
 		const baseGeminiUrl = getBaseGeminiUrl(env);
-		// Construct the target URL using the path *after* /v1beta
-		const targetPath = `${baseGeminiUrl}${pathAfterBase}`; // Base URL + Path after /v1beta
-		const targetUrl = new URL(targetPath);
+		// Construct the target URL using the base URL and the *actual detected* Gemini path
+		      // and the potentially modified query string (with client's 'key' removed)
+		const targetUrl = `${baseGeminiUrl}${actualGeminiPath}${originalQuery}`;
 
-		// --- Clean and Forward Query Parameters ---
-		const originalParams = new URLSearchParams(originalQueryString); // Parse original query string
-		const targetParams = new URLSearchParams();
-		originalParams.forEach((value, key) => {
-			// IMPORTANT: Exclude the 'key' parameter (Worker API Key) when forwarding
-			if (key.toLowerCase() !== 'key') {
-				targetParams.append(key, value);
-			}
-		});
-		// IMPORTANT: Add the rotated Gemini API key as 'key' parameter for the outgoing request
-		targetParams.set('key', selectedKey.key);
-
-		// Append the final parameters to the target URL
-		targetUrl.search = targetParams.toString();
-
-		console.log(`Proxying to target URL: ${targetUrl.toString()} with Gemini key ID: ${selectedKey.id}`);
+		console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
 
 		// --- 4. Prepare Headers ---
 		const headersToForward = new Headers(request.headers);
 		// Remove headers specific to this proxy or potentially problematic
 		headersToForward.delete('host');
-		headersToForward.delete('authorization'); // Remove original worker key auth (if present)
+		headersToForward.delete('authorization'); // Remove original worker key auth (whether from header or query)
 		headersToForward.delete('connection');
-		// Gemini API key is now added via targetUrl.searchParams above
-		headersToForward.delete('x-goog-api-key'); // Ensure no conflicting header is sent
+		// Add the *rotated Gemini API key* via query parameter
+		const urlWithKey = new URL(targetUrl);
+		urlWithKey.searchParams.set('key', selectedKey.key);
 
 		// Set a user-agent
 		headersToForward.set('user-agent', 'gemini-proxy-panel-worker/v1beta');
@@ -345,7 +345,7 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 		// Clone the request to read the body if necessary, or pass the original body stream
 		const body = (method !== 'GET' && method !== 'HEAD') ? request.body : null;
 
-		const geminiResponse = await fetch(targetUrl.toString(), { // Use the final URL with Gemini key param
+		const geminiResponse = await fetch(urlWithKey.toString(), {
 			method: method,
 			headers: headersToForward,
 			body: body,
@@ -377,10 +377,17 @@ async function handleApiV1Beta(request: Request, env: Env, ctx: ExecutionContext
 				console.warn(`Gemini API returned non-OK status ${geminiResponse.status} for key ${selectedKey.id} on /v1beta`);
 				if (geminiResponse.status === 429) {
 					// Attempt to read error message (clone response if body needed elsewhere)
-					// Note: Reading the body here might prevent it from being streamed to the client
-					// It's safer to handle 429 without reading the body if streaming is critical
-					let errorMessage = "Quota exceeded (could not read body)";
-					// try { errorMessage = await geminiResponse.clone().text(); } catch {} // Example if cloning needed
+					               // Note: Reading the body here might prevent it from being streamed to the client.
+					               // It's safer to handle 429 without reading the body if streaming is critical.
+					               // We'll pass a generic message if reading fails.
+					               let errorMessage = "Quota exceeded (could not read body)";
+					               try {
+					                   // Clone the response to read the body without consuming it for the client
+					                   const clonedResponse = geminiResponse.clone();
+					                   errorMessage = await clonedResponse.text();
+					               } catch (e) {
+					                    console.error("Could not clone/read error body for 429 handling:", e);
+					               }
 					await handle429Error(selectedKey.id, env, modelCategory!, modelId ?? undefined, errorMessage);
 				} else if (geminiResponse.status === 401 || geminiResponse.status === 403) {
 					await recordKeyError(selectedKey.id, env, geminiResponse.status as 401 | 403);
