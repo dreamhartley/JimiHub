@@ -6,9 +6,6 @@ const configService = require('../services/configService'); // Needed for model 
 
 const router = express.Router();
 
-// Apply worker authentication middleware to all /v1beta routes
-router.use(requireWorkerAuth);
-
 // --- Helper to get the effective base URL for Gemini API ---
 function getGeminiBaseUrl() {
     const customGateway = process.env.CF_GATEWAY;
@@ -19,53 +16,55 @@ function getGeminiBaseUrl() {
 
 // Middleware to extract Worker API Key from query param if header is missing
 const workerAuthFromQuery = (req, res, next) => {
+    // Only check query param if Authorization header is missing
     if (!req.headers.authorization && req.query.key) {
         // Found key in query param, treat it as Worker API Key for this request
         // Attach the key to a custom property on req instead of modifying headers
         req.workerApiKeyFromQuery = req.query.key;
         console.log('Found Worker API Key in query parameter.');
         // IMPORTANT: Remove the key from the query object so it's not forwarded
-        delete req.query.key;
-        // Reconstruct req.url without the key for subsequent middleware/routing
+        // Need to modify req.url as subsequent middleware might rely on it
         const urlParts = req.url.split('?');
         const queryParams = new URLSearchParams(urlParts[1] || '');
         queryParams.delete('key');
         req.url = urlParts[0] + (queryParams.toString() ? `?${queryParams.toString()}` : '');
+        // Also delete from req.query for safety, although modifying req.url should be sufficient for Express routing
+        delete req.query.key;
     }
     next();
 };
 
 // Apply query param auth check *before* the standard worker auth
 router.use(workerAuthFromQuery);
-router.use(requireWorkerAuth); // Now this can validate header even if it came from query
+// Apply standard worker authentication middleware (checks header, then req.workerApiKeyFromQuery if needed)
+router.use(requireWorkerAuth);
 
 // --- Catch-all handler for /v1beta/* ---
 router.all('*', async (req, res, next) => {
-    const workerApiKey = req.workerApiKey; // Now correctly populated even from query
-    // Extract the path *after* /v1beta/
-    let subPath = req.path;
-    // Find the actual Gemini API path (e.g., /models, /files) after potential extra segments
-    const geminiPathMatch = subPath.match(/(\/models\/|\/files\/|\/operations\/|\/tunedModels\/|\/permission\/).*/);
-    const actualGeminiPath = geminiPathMatch ? geminiPathMatch[0] : subPath; // Fallback to subPath if pattern not found
+    // req.workerApiKey is attached by requireWorkerAuth after checking header and potentially req.workerApiKeyFromQuery
+    const workerApiKey = req.workerApiKey;
 
-    // Get the original query string (already modified by workerAuthFromQuery if key was present)
-    const originalQuery = req.url.split('?')[1] || '';
+    // Extract the full path *after* the base path where this router is mounted (/v1beta)
+    // req.originalUrl contains the full original URL including mount path
+    // req.baseUrl contains the mount path (/v1beta)
+    const pathAfterV1Beta = req.originalUrl.substring(req.baseUrl.length);
+    const originalPathAndQuery = pathAfterV1Beta.split('?');
+    const originalPath = originalPathAndQuery[0]; // e.g., /v1alpha/models/gemini-pro:generateContent or /models/gemini-pro:generateContent
+    // Get the query string (potentially modified by workerAuthFromQuery to remove 'key')
+    const originalQuery = req.url.split('?')[1] || ''; // Use req.url as it might have been modified by middleware
     const method = req.method;
     const requestBody = req.body; // Assumes express.json() is used
 
-    console.log(`Received /v1beta request. Worker Key: ${workerApiKey ? 'OK' : 'Not Found/Invalid'}. Original SubPath: ${subPath}. Detected Gemini Path: ${actualGeminiPath}`);
-
-    console.log(`Received /v1beta request: ${method} ${originalPath}`);
+    console.log(`Received /v1beta request: ${method} ${originalPath}. Worker Key: ${workerApiKey ? 'OK' : 'Not Found/Invalid'}`);
 
     try {
         // --- 1. Extract Model ID for Key Selection ---
-        // Attempt to extract model from path like /models/gemini-pro:action
-        // Attempt to extract model from the *actual* Gemini path
-        const modelMatch = actualGeminiPath.match(/^\/models\/([^:]+):/);
+        // Attempt to extract model from the original path after /v1beta
+        const modelMatch = originalPath.match(/^\/models\/([^:]+):/);
         const modelId = modelMatch ? modelMatch[1] : null;
 
         if (!modelId) {
-            console.warn(`Could not extract modelId from normalized path: ${normalizedPath} (original client path: ${clientPath}) for key selection.`);
+            console.warn(`Could not extract modelId from path: ${originalPath} for key selection.`);
             // Proceed without modelId for key selection if necessary, or return error?
             // For now, let's proceed, getNextAvailableGeminiKey might handle null modelId
         }
@@ -81,8 +80,8 @@ router.all('*', async (req, res, next) => {
 
         // --- 3. Construct Target Gemini URL ---
         const baseGeminiUrl = getGeminiBaseUrl();
-        // Append the *actual detected* Gemini path and the (potentially modified) query string
-        const targetUrl = `${baseGeminiUrl}${actualGeminiPath}${originalQuery ? '?' + originalQuery : ''}`;
+        // Construct the target URL using the base URL and the original path/query after /v1beta
+        const targetUrl = `${baseGeminiUrl}${originalPath}${originalQuery ? '?' + originalQuery : ''}`;
 
         console.log(`Proxying to target URL: ${targetUrl} with key ID: ${selectedKey.id}`);
 
@@ -90,9 +89,9 @@ router.all('*', async (req, res, next) => {
         const headersToForward = { ...req.headers };
         // Remove headers specific to this proxy or potentially problematic
         delete headersToForward['host'];
-        delete headersToForward['authorization']; // Remove original worker key auth (whether from header or query)
+        delete headersToForward['authorization']; // Remove original worker key auth (present if sourced from header or query)
         delete headersToForward['connection'];
-        // Add the Gemini API key
+        // Add the Gemini API key using the standard header
         headersToForward['x-goog-api-key'] = selectedKey.key;
         // Ensure content-type is present if there's a body
         if (method !== 'GET' && method !== 'HEAD' && !headersToForward['content-type']) {

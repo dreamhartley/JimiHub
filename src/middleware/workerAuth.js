@@ -1,7 +1,8 @@
 const { db } = require('../db'); // Import the database connection
 
 /**
- * Express middleware to validate the Worker API Key provided in the Authorization header.
+ * Express middleware to validate the Worker API Key provided in the Authorization header
+ * or via a custom property set by a preceding middleware (e.g., from query param).
  * Checks against the `worker_keys` table in the database.
  * @param {import('express').Request} req
  * @param {import('express').Response} res
@@ -40,7 +41,7 @@ async function requireWorkerAuth(req, res, next) {
 
             // Key is valid, attach it to the request object for potential use later
             // (e.g., determining safety settings)
-            req.workerApiKey = workerApiKey;
+            req.workerApiKey = workerApiKey; // Attach the validated key
 
             // Proceed to the next middleware or route handler
             next();
