@@ -21,9 +21,9 @@ function getGeminiBaseUrl() {
 const workerAuthFromQuery = (req, res, next) => {
     if (!req.headers.authorization && req.query.key) {
         // Found key in query param, treat it as Worker API Key for this request
-        // Attach it for requireWorkerAuth middleware or direct use
-        req.headers.authorization = `Bearer ${req.query.key}`;
-        console.log('Using Worker API Key from query parameter.');
+        // Attach the key to a custom property on req instead of modifying headers
+        req.workerApiKeyFromQuery = req.query.key;
+        console.log('Found Worker API Key in query parameter.');
         // IMPORTANT: Remove the key from the query object so it's not forwarded
         delete req.query.key;
         // Reconstruct req.url without the key for subsequent middleware/routing

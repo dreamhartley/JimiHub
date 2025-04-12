@@ -9,10 +9,17 @@ const { db } = require('../db'); // Import the database connection
  */
 async function requireWorkerAuth(req, res, next) {
     const authHeader = req.headers.authorization;
-    const workerApiKey = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    let workerApiKey = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+
+    // If key not found in header, check the custom property set by workerAuthFromQuery
+    if (!workerApiKey && req.workerApiKeyFromQuery) {
+        console.log('Using Worker API Key previously found in query parameter.');
+        workerApiKey = req.workerApiKeyFromQuery;
+    }
 
     if (!workerApiKey) {
-        return res.status(401).json({ error: 'Missing API key. Provide it in the Authorization header as "Bearer YOUR_KEY".' });
+        // If still no key after checking both header and query (via custom property)
+        return res.status(401).json({ error: 'Missing API key. Provide it in the Authorization header as "Bearer YOUR_KEY" or as "?key=YOUR_KEY" query parameter.' });
     }
 
     try {
